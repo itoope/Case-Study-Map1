@@ -1,0 +1,280 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>IB ESS Case Studies Map</title>
+  <meta name="referrer" content="strict-origin-when-cross-origin">
+
+  <!-- Leaflet CSS -->
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+  <!-- PapaParse for parsing CSV directly from your Google Sheet -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/PapaParse/5.4.1/papaparse.min.js"></script>
+
+  <style>
+    * {
+      box-sizing: border-box;
+    }
+    body, html {
+      margin: 0;
+      padding: 0;
+      height: 100%;
+      width: 100%;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Arial, sans-serif;
+    }
+    #map {
+      width: 100%;
+      height: 100vh;
+      background: #dcdfd8;
+    }
+
+    /* Top-Right Category Filter Panel */
+    .category-filter-box {
+      background: #ffffff;
+      padding: 12px 16px;
+      border-radius: 8px;
+      box-shadow: 0 4px 14px rgba(0, 0, 0, 0.18);
+      font-size: 13px;
+      max-height: 85vh;
+      overflow-y: auto;
+      min-width: 220px;
+    }
+    .category-filter-box strong {
+      display: block;
+      font-size: 14px;
+      margin-bottom: 8px;
+      color: #111827;
+      border-bottom: 1px solid #e5e7eb;
+      padding-bottom: 6px;
+    }
+    .category-option {
+      display: flex;
+      align-items: center;
+      margin-bottom: 7px;
+      cursor: pointer;
+      user-select: none;
+    }
+    .category-option input {
+      margin-right: 8px;
+      cursor: pointer;
+    }
+    .color-dot {
+      width: 11px;
+      height: 11px;
+      border-radius: 50%;
+      display: inline-block;
+      margin-right: 8px;
+      flex-shrink: 0;
+    }
+
+    /* Popup Styling */
+    .leaflet-popup-content-wrapper {
+      border-radius: 8px;
+      box-shadow: 0 4px 12px rgba(0, 0, 0, 0.2);
+    }
+    .popup-title {
+      font-size: 15px;
+      font-weight: 700;
+      margin-bottom: 4px;
+      color: #111827;
+    }
+    .popup-badge {
+      display: inline-block;
+      color: white;
+      font-size: 10px;
+      padding: 2px 7px;
+      border-radius: 10px;
+      margin-bottom: 6px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+    }
+    .popup-desc {
+      font-size: 12.5px;
+      color: #374151;
+      line-height: 1.4;
+      margin-bottom: 4px;
+    }
+    .popup-doc-link {
+      display: inline-block;
+      margin-top: 8px;
+      background-color: #2563eb;
+      color: #ffffff !important;
+      text-decoration: none;
+      font-size: 11px;
+      font-weight: 600;
+      padding: 6px 12px;
+      border-radius: 4px;
+      transition: background 0.2s;
+    }
+    .popup-doc-link:hover {
+      background-color: #1d4ed8;
+    }
+  </style>
+</head>
+<body>
+
+  <div id="map"></div>
+
+  <!-- Leaflet JavaScript -->
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+
+  <script>
+    // 1. Initialize Map
+    const map = L.map('map').setView([22, 10], 2);
+
+    // 2. ArcGIS Light Gray Canvas Tiles
+    L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Light_Gray_Base/MapServer/tile/{z}/{y}/{x}', {
+      attribution: 'Tiles &copy; Esri &mdash; Esri, DeLorme, NAVTEQ',
+      maxZoom: 16
+    }).addTo(map);
+
+    L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Light_Gray_Reference/MapServer/tile/{z}/{y}/{x}', {
+      attribution: '',
+      maxZoom: 16
+    }).addTo(map);
+
+    // 3. Category Palette (Supports up to 8 distinct categories)
+    const groupPalette = [
+      '#e6194B', '#3cb44b', '#4363d8', '#f58231', 
+      '#911eb4', '#00b4d8', '#f032e6', '#e5a100'
+    ];
+
+    function createPin(color) {
+      const svg = `
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="28" height="28">
+          <path fill="${color}" stroke="#ffffff" stroke-width="1.5" d="M12 0C7.58 0 4 3.58 4 8c0 5.25 8 16 8 16s8-10.75 8-16c0-4.42-3.58-8-8-8zm0 11c-1.66 0-3-1.34-3-3s1.34-3 3-3 3 1.34 3 3-1.34 3-3 3z"/>
+        </svg>`;
+      return L.divIcon({
+        html: svg,
+        className: '',
+        iconSize: [28, 28],
+        iconAnchor: [14, 28],
+        popupAnchor: [0, -25]
+      });
+    }
+
+    let allMarkers = [];
+    let categoryLayers = {};
+    let categoryColors = {};
+
+    // 4. Create Category Switcher in Top Right
+    const filterControl = L.control({ position: 'topright' });
+    filterControl.onAdd = function() {
+      const div = L.DomUtil.create('div', 'category-filter-box');
+      div.id = 'categoryFilterList';
+      div.innerHTML = `<strong>Loading data...</strong>`;
+      L.DomEvent.disableClickPropagation(div);
+      return div;
+    };
+    filterControl.addTo(map);
+
+    // 5. Function to Render Markers from Sheet Rows
+    function renderData(dataRows) {
+      allMarkers.forEach(m => map.removeLayer(m));
+      allMarkers = [];
+      categoryLayers = {};
+      categoryColors = {};
+
+      const categories = [...new Set(dataRows.map(r => (r.Category || r.category || 'General').trim()))];
+
+      categories.forEach((cat, idx) => {
+        categoryColors[cat] = groupPalette[idx % groupPalette.length];
+        categoryLayers[cat] = [];
+      });
+
+      dataRows.forEach(row => {
+        const lat = parseFloat(row.lat || row.Latitude || row.latitude);
+        const lng = parseFloat(row.lng || row.Longitude || row.longitude || row.long);
+        const name = row.Name || row.name || 'Untitled Case Study';
+        const category = (row.Category || row.category || 'General').trim();
+        const desc = row.Description || row.description || '';
+        const link = (row.Link || row.link || row.URL || row.url || '').trim();
+
+        if (!isNaN(lat) && !isNaN(lng)) {
+          const color = categoryColors[category];
+          const icon = createPin(color);
+
+          const linkBtn = link
+            ? `<a href="${link}" target="_blank" rel="noopener noreferrer" class="popup-doc-link">Open Case Study Doc &rarr;</a>`
+            : '';
+
+          const popupHtml = `
+            <div class="popup-title">${name}</div>
+            <div class="popup-badge" style="background-color: ${color};">${category}</div>
+            <div class="popup-desc">${desc}</div>
+            ${linkBtn}
+          `;
+
+          const marker = L.marker([lat, lng], { icon: icon }).bindPopup(popupHtml);
+          marker.addTo(map);
+
+          allMarkers.push(marker);
+          categoryLayers[category].push(marker);
+        }
+      });
+
+      buildFilterMenu(categories);
+    }
+
+    // 6. Build the Radio Button Filter Menu
+    function buildFilterMenu(categories) {
+      const container = document.getElementById('categoryFilterList');
+      let html = `<strong>Filter Categories</strong>`;
+
+      html += `
+        <label class="category-option">
+          <input type="radio" name="catFilter" value="ALL" checked onchange="filterCategory('ALL')">
+          <span style="font-weight:600;">Show All Pins</span>
+        </label>
+      `;
+
+      categories.forEach(cat => {
+        const color = categoryColors[cat];
+        html += `
+          <label class="category-option">
+            <input type="radio" name="catFilter" value="${cat}" onchange="filterCategory('${cat.replace(/'/g, "\\'")}')">
+            <span class="color-dot" style="background:${color};"></span>
+            <span>${cat}</span>
+          </label>
+        `;
+      });
+
+      container.innerHTML = html;
+    }
+
+    // 7. Toggle Filter Function
+    window.filterCategory = function(selectedCategory) {
+      allMarkers.forEach(m => map.removeLayer(m));
+
+      if (selectedCategory === 'ALL') {
+        allMarkers.forEach(m => map.addLayer(m));
+      } else if (categoryLayers[selectedCategory]) {
+        categoryLayers[selectedCategory].forEach(m => map.addLayer(m));
+      }
+    };
+
+    // 8. Direct Live Sync Link to your Google Sheet
+    const GOOGLE_SHEET_CSV_URL = 'https://docs.google.com/spreadsheets/d/1sEfGmLeUiNPHlDzY9W06KCwQjkex3Gtgv4saUDGw3yc/gviz/tq?tqx=out:csv&gid=527498383';
+
+    // 9. Fetch Live Sheet Data on Page Load
+    Papa.parse(GOOGLE_SHEET_CSV_URL, {
+      download: true,
+      header: true,
+      skipEmptyLines: true,
+      complete: function(results) {
+        if (results.data && results.data.length > 0) {
+          renderData(results.data);
+        } else {
+          document.getElementById('categoryFilterList').innerHTML = '<strong>No data found in Google Sheet</strong>';
+        }
+      },
+      error: function(err) {
+        console.error("Error loading Google Sheet:", err);
+        document.getElementById('categoryFilterList').innerHTML = '<strong>Error loading data from Google Sheet</strong>';
+      }
+    });
+  </script>
+
+</body>
+</html>
